@@ -1,195 +1,156 @@
 import java.util.*;
 
 public class RockPaperScissors {
+    enum Move {
+        ROCK, PAPER, SCISSORS;
+        public static final int SIZE = Move.values().length;
+
+        // 获取打败当前手势的手势
+        public Move beat() {
+            return Move.values()[(this.ordinal() + 1) % SIZE];
+        }
+    }
+
     private static final int MAX_RECENT_MOVES = 300;
     private static final double DECAY_FACTOR = 0.9;
     private static final int THRESHOLD = 3;
+    private static final int MAX_SEQUENCES = 100;
+    private static final int MAX_PATTERNS = 100;
 
-    // 存储模式和它们出现的次数
-    private final Map<String, Integer> patternCounts = new HashMap<>();
+    private final Map<List<Move>, Integer> patternCounts = new HashMap<>();
+    private final Map<List<Move>, Double> patternPriorities = new HashMap<>();
+    private final LinkedList<Move> recentMoves = new LinkedList<>();
 
-    // 存储模式和它们的优先级
-    private final Map<String, Double> patternPriorities = new HashMap<>();
+    private final int[][][] transitionCounts = new int[Move.SIZE][Move.SIZE][Move.SIZE];
+    private Move secondLastMove = null;
+    private Move lastMove = null;
 
-    // 对手的最近出招
-    private String recentMoves = "";
+    private final List<Move> recentActions = new ArrayList<>();
+    private final Map<List<Move>, Integer> sequences = new HashMap<>();
+    private List<Move> cycle = new ArrayList<>();
 
-    // 添加一个新的成员变量来存储每个转移的次数
-    private int[][][] transitionCounts = new int[3][3][3];
-
-    private int secondLastMove = -1;
-    private int lastMove = -1;
-    private static final int CYCLE_BUFFER_SIZE = 10;
-    // 用于存储最近的动作
-    private List<String> recentActions = new ArrayList<>();
-    // 当前识别到的周期
-    private String cycle = "";
-
-    public void recordOpponentMove(String move) {
-        recentMoves += move;
-        if (recentMoves.length() > MAX_RECENT_MOVES) {
-            recentMoves = recentMoves.substring(recentMoves.length() - MAX_RECENT_MOVES);
+    public void recordOpponentMove(Move move) {
+        recentMoves.offerLast(move);
+        if (recentMoves.size() > MAX_RECENT_MOVES) {
+            recentMoves.pollFirst();
         }
         updatePatterns();
 
-        // 更新转移次数
-        int moveIndex = "RPS".indexOf(move);
-        if (secondLastMove != -1 && lastMove != -1) {
-            transitionCounts[secondLastMove][lastMove][moveIndex]++;
+        if (secondLastMove != null && lastMove != null) {
+            transitionCounts[secondLastMove.ordinal()][lastMove.ordinal()][move.ordinal()]++;
         }
         secondLastMove = lastMove;
-        lastMove = moveIndex;
+        lastMove = move;
+
         recentActions.add(move);
-        if (recentActions.size() > CYCLE_BUFFER_SIZE) {
+        if (recentActions.size() > MAX_RECENT_MOVES) {
             recentActions.remove(0);
         }
 
-        // 检查是否有周期性模式
+        updateSequences(move);
         cycle = detectCycle(recentActions);
-
     }
 
-    private String detectCycle(List<String> actions) {
-        for (int cycleLength = 1; cycleLength <= actions.size() / 2; cycleLength++) {
-            boolean hasCycle = true;
-            for (int i = 0; i < cycleLength; i++) {
-                if (!actions.get(actions.size() - 1 - i).equals(actions.get(actions.size() - 1 - cycleLength - i))) {
-                    hasCycle = false;
-                    break;
-                }
-            }
-            if (hasCycle) {
-                return String.join("", actions.subList(actions.size() - cycleLength, actions.size()));
-            }
+    private void updateSequences(Move move) {
+        for (int i = 0; i < recentMoves.size(); i++) {
+            List<Move> sequence = new ArrayList<>(recentMoves.subList(i, recentMoves.size()));
+            sequence.add(move);
+            sequences.put(sequence, sequences.getOrDefault(sequence, 0) + 1);
         }
-        return "";
+
+        cleanupMap(sequences, MAX_SEQUENCES);
     }
+
     private void updatePatterns() {
-        for (int len = 1; len <= recentMoves.length(); len++) {
-            String pattern = recentMoves.substring(recentMoves.length() - len);
+        for (int len = 1; len <= recentMoves.size(); len++) {
+            List<Move> pattern = new ArrayList<>(recentMoves.subList(recentMoves.size() - len, recentMoves.size()));
             int count = patternCounts.getOrDefault(pattern, 0);
             patternCounts.put(pattern, count + 1);
 
-            // 增加一个特殊的检查，以便识别长度为3的重复模式
-            if (len == 3 && recentMoves.length() >= 9) {
-                String lastThreePatterns = recentMoves.substring(recentMoves.length() - 9);
-                if (lastThreePatterns.equals(pattern + pattern + pattern)) {
-                    patternPriorities.put(pattern, Double.MAX_VALUE);
-                    continue;
-                }
-            }
-
             if (count >= THRESHOLD) {
-                double priority = Math.pow(len, count) * Math.pow(DECAY_FACTOR, recentMoves.length() - len);
+                double priority = Math.pow(len, count) * Math.pow(DECAY_FACTOR, recentMoves.size() - len);
                 patternPriorities.put(pattern, priority);
             }
         }
+
+        cleanupMap(patternCounts, MAX_PATTERNS);
+        cleanupMap(patternPriorities, MAX_PATTERNS);
     }
 
+    private <K, V extends Comparable<V>> void cleanupMap(Map<K, V> map, int maxSize) {
+        if (map.size() > maxSize) {
+            List<Map.Entry<K, V>> sortedEntries = new ArrayList<>(map.entrySet());
+            sortedEntries.sort(Map.Entry.comparingByValue());
+            map.clear();
+            for (int i = sortedEntries.size() - maxSize; i < sortedEntries.size(); i++) {
+                Map.Entry<K, V> entry = sortedEntries.get(i);
+                map.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
 
-    public String makeMove() {
-        // 如果对手的出招足够随机，我们也随机出招
+    private List<Move> detectCycle(List<Move> recentActions) {
+        List<Move> bestCycle = new ArrayList<>();
+        int bestScore = 0;
+
+        for (Map.Entry<List<Move>, Integer> entry : sequences.entrySet()) {
+            List<Move> sequence = entry.getKey();
+            int score = entry.getValue();
+
+            if (score >= 3 && sequence.size() > bestCycle.size()) {
+                bestCycle = sequence;
+                bestScore = score;
+            }
+        }
+
+        return bestScore >= 2 ? bestCycle : new ArrayList<>();
+    }
+
+    public Move makeMove() {
         if (isOpponentRandom() || patternPriorities.isEmpty()) {
-            // 这里使用一个简单的循环来实现伪随机
-            int moveIndex = recentMoves.length() % 3;
-            switch (moveIndex) {
-                case 0:
-                    return "R"; // 石头
-                case 1:
-                    return "P"; // 布
-                case 2:
-                    return "S"; // 剪刀
-            }
+            return Move.values()[recentMoves.size() % Move.SIZE];
         }
 
-        // 如果我们检测到一个周期，就预测对手的下一步动作并选择能赢的动作
         if (!cycle.isEmpty()) {
-            char predictedMove = cycle.charAt(0);
-            cycle = cycle.substring(1) + predictedMove;
-            switch (predictedMove) {
-                case 'R':
-                    return "P"; // 对手出石头，我出布
-                case 'P':
-                    return "S"; // 对手出布，我出剪刀
-                case 'S':
-                    return "R"; // 对手出剪刀，我出石头
-            }
+            Move predictedMove = cycle.get(0);
+            return predictedMove.beat();
         }
 
-        // 否则，我们按照上面的方法选择基于模式的出招
-        // 使用马尔可夫模型预测
-            if (secondLastMove != -1 && lastMove != -1) {
-                int nextMove = 0;
-                for (int i = 0; i < 3; i++) {
-                    if (transitionCounts[secondLastMove][lastMove][i] > transitionCounts[secondLastMove][lastMove][nextMove]) {
-                        nextMove = i;
-                    }
+        if (secondLastMove != null && lastMove != null) {
+            int nextMoveIndex = 0;
+            for (int i = 0; i < Move.SIZE; i++) {
+                if (transitionCounts[secondLastMove.ordinal()][lastMove.ordinal()][i] > transitionCounts[secondLastMove.ordinal()][lastMove.ordinal()][nextMoveIndex]) {
+                    nextMoveIndex = i;
                 }
-
-                // 如果马尔可夫模型预测出了一个动作，我们就用这个动作
-                if (transitionCounts[secondLastMove][lastMove][nextMove] > 0) {
-                    switch ((nextMove + 1) % 3) { // 选择可以打败预测出招的出招
-                        case 0:
-                            return "R";
-                        case 1:
-                            return "P";
-                        default:
-                            return "S";
-                    }
-                }}
-
-        // 找到优先级最高的模式
-        String bestPattern = Collections.max(patternPriorities.entrySet(), Map.Entry.comparingByValue()).getKey();
-        // 根据优先级最高的模式选择出招
-        if (bestPattern.length() == 3) {
-            // 这是一个循环模式，我们预测对手的下一个动作是什么
-            char predictedMove = bestPattern.charAt(recentMoves.length() % 3);
-            switch (predictedMove) {
-                case 'R':
-                    return "P"; // 预测对手出石头，我出布
-                case 'P':
-                    return "S"; // 预测对手出布，我出剪刀
-                case 'S':
-                    return "R"; // 预测对手出剪刀，我出石头
             }
+
+            if (transitionCounts[secondLastMove.ordinal()][lastMove.ordinal()][nextMoveIndex] > 0) {
+                return Move.values()[nextMoveIndex].beat();
+            }
+        }
+
+        List<Move> bestPattern = Collections.max(patternPriorities.entrySet(), Map.Entry.comparingByValue()).getKey();
+        if (bestPattern.size() == Move.SIZE) {
+            Move predictedMove = bestPattern.get(recentMoves.size() % Move.SIZE);
+            return predictedMove.beat();
         } else {
-            // 对于非循环模式，我们假设对手的下一个动作和他们的最后一个动作相同
-            char lastMove = bestPattern.charAt(bestPattern.length() - 1);
-            switch (lastMove) {
-                case 'R':
-                    return "P"; // 对手出石头，我出布
-                case 'P':
-                    return "S"; // 对手出布，我出剪刀
-                case 'S':
-                    return "R"; // 对手出剪刀，我出石头
-            }
+            Move lastMove = bestPattern.get(bestPattern.size() - 1);
+            return lastMove.beat();
         }
-        return "R";
     }
-
-
-
-
-
-
-
-
     private boolean isOpponentRandom() {
-        int rockCount = 0, paperCount = 0, scissorsCount = 0;
-        for (int i = 0; i < recentMoves.length(); i++) {
-            switch (recentMoves.charAt(i)) {
-                case 'R' -> rockCount++;
-                case 'P' -> paperCount++;
-                case 'S' -> scissorsCount++;
-            }
+        int[] moveCounts = new int[Move.SIZE];
+        for (Move move : recentMoves) {
+            moveCounts[move.ordinal()]++;
         }
 
-        double total = recentMoves.length();
-        double expected = total / 3;
+        double total = recentMoves.size();
+        double expected = total / Move.SIZE;
 
-        double chiSquared = Math.pow(rockCount - expected, 2) / expected +
-                Math.pow(paperCount - expected, 2) / expected +
-                Math.pow(scissorsCount - expected, 2) / expected;
+        double chiSquared = 0;
+        for (int count : moveCounts) {
+            chiSquared += Math.pow(count - expected, 2) / expected;
+        }
 
         return chiSquared <= 5.99;
     }
